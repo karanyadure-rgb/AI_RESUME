@@ -1,0 +1,24 @@
+# Environment
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Project-generated artifacts (regenerated each run — don't track these)
+resume/
+resume_data.json
+jd_data.json
+match_report.json
+suggestions.json
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
