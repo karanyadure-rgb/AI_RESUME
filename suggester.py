@@ -1,134 +1,189 @@
+
+"""Generate honest resume-improvement suggestions using Groq."""
+
 import json
-import os
 import time
 from pathlib import Path
 
-from dotenv import load_dotenv
-from openai import OpenAI
-
-load_dotenv()
-
-client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=os.getenv("GROQ_API_KEY"),
-)
-
-MODEL = "llama-3.1-8b-instant"
+from llm_client import get_client, MODEL
 
 
-def _call_model(prompt: str, max_tokens: int) -> dict:
-    """Shared call + parse logic, same pattern as jd_extractor.py /
-    resume_extractor.py: JSON mode, temperature 0, strip stray fences."""
+def _call_model(prompt: str, max_tokens: int = 1200) -> dict:
+    """Call Groq and validate its JSON response."""
+
+    client = get_client()
+
     try:
         response = client.chat.completions.create(
             model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a resume analysis assistant. "
+                        "Return a single valid JSON object only. "
+                        "Keep every answer concise. Never invent "
+                        "skills or experience."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
             temperature=0,
+            max_completion_tokens=max_tokens,
             response_format={"type": "json_object"},
+            reasoning_effort="low",
         )
-    except Exception as e:
-        raise RuntimeError(f"Suggestion call failed: {e}") from e
 
-    raw = response.choices[0].message.content.strip()
-    
-    # Strip markdown code fences if the model accidentally includes them
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        if raw.lower().startswith("json"):
-            raw = raw[4:].strip()
+        raw = response.choices[0].message.content
 
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Model did not return valid JSON: {raw[:300]}") from e
+        if not raw:
+            raise ValueError("The AI returned an empty suggestion.")
+
+        result = json.loads(raw)
+
+        if not isinstance(result, dict):
+            raise ValueError("The AI response must be a JSON object.")
+
+        return result
+
+    except Exception as exc:
+        raise RuntimeError(f"Suggestion call failed: {exc}") from exc
 
 
 def _resume_context_blob(resume_data: dict) -> str:
-    """Everything real about the candidate, handed to the model as its
-    ONLY source of truth — this is what keeps it from inventing things."""
+    """Build a compact context using only the candidate's real resume."""
+
     parts = []
-    if resume_data.get("summary"):
-        parts.append(f"Summary: {resume_data['summary']}")
-    if resume_data.get("skills"):
-        parts.append("Skills: " + ", ".join(resume_data["skills"]))
-    if resume_data.get("experience_bullets"):
-        parts.append("Experience bullets:\n- " + "\n- ".join(resume_data["experience_bullets"]))
-    if resume_data.get("education"):
-        parts.append("Education: " + ", ".join(resume_data["education"]))
-    return "\n\n".join(parts)
+
+    summary = resume_data.get("summary", "")
+    if isinstance(summary, str) and summary.strip():
+        parts.append(f"Summary: {summary.strip()}")
+
+    skills = resume_data.get("skills", [])
+    if isinstance(skills, list) and skills:
+        parts.append("Skills: " + ", ".join(str(x) for x in skills))
+    elif isinstance(skills, str) and skills.strip():
+        parts.append("Skills: " + skills.strip())
+
+    experience = resume_data.get("experience_bullets", [])
+    if isinstance(experience, list) and experience:
+        parts.append(
+            "Experience:\n- "
+            + "\n- ".join(str(x) for x in experience[:15])
+        )
+
+    education = resume_data.get("education", [])
+    if isinstance(education, list) and education:
+        parts.append("Education: " + "; ".join(str(x) for x in education))
+    elif isinstance(education, str) and education.strip():
+        parts.append("Education: " + education.strip())
+
+    context = "\n\n".join(parts)
+
+    if not context:
+        raise ValueError("No usable resume information was provided.")
+
+    return context
 
 
 def suggest_for_requirement(requirement: str, resume_context: str) -> dict:
-    """For one unmatched JD requirement: is there real resume experience
-    that could be honestly reworded to address it?"""
-    prompt = f"""You are helping rewrite resume bullets to better match a job requirement.
+    """Suggest a truthful rewrite for one unmatched requirement."""
 
-RULES (do not break these):
-- Only use experience that actually appears in the candidate's resume below.
-- Never invent tools, skills, metrics, or experience the candidate doesn't have.
-- If nothing in the resume honestly relates to this requirement, say so — do not fabricate a bullet.
+    prompt = f"""
+Review the candidate's resume against this job requirement.
 
-Candidate's actual resume content:
-\"\"\"
+RESUME:
 {resume_context}
-\"\"\"
 
-Job requirement not currently well-matched:
-\"\"\"
+JOB REQUIREMENT:
 {requirement}
-\"\"\"
 
-Return ONLY valid JSON (no markdown, no code fences) in this exact shape:
+Use only evidence from the resume. Never invent experience, tools,
+skills, or measurements. If no genuine match exists, return false
+and leave suggested_bullet empty.
+
+Return this JSON structure:
 {{
-  "has_real_match": true or false,
-  "suggested_bullet": "a rewritten/reframed resume bullet using ONLY real resume content, or empty string if has_real_match is false",
-  "reasoning": "one sentence explaining the connection, or why there's no honest match"
+  "has_real_match": false,
+  "suggested_bullet": "",
+  "reasoning": "Brief explanation"
 }}
+
+Keep reasoning to one short sentence.
 """
-    return _call_model(prompt, max_tokens=400)
+
+    result = _call_model(prompt, max_tokens=1200)
+
+    if not isinstance(result.get("has_real_match"), bool):
+        raise ValueError("Invalid has_real_match value in AI response.")
+
+    result.setdefault("suggested_bullet", "")
+    result.setdefault("reasoning", "")
+
+    return result
 
 
 def suggest_for_keyword(keyword: str, resume_context: str) -> dict:
-    """For a missing required skill: is it genuinely absent, or just
-    phrased differently somewhere in the resume?"""
-    prompt = f"""A job requires the skill "{keyword}". Check the candidate's actual resume
-below and decide honestly.
+    """Check whether a missing keyword is already evidenced by the resume."""
 
-RULES:
-- Only say yes if the resume genuinely shows this skill (even under different wording).
-- If the resume does not show it, say so plainly — do not suggest adding a skill they don't have.
+    prompt = f"""
+Determine whether the resume genuinely demonstrates this skill:
+{keyword}
 
-Candidate's actual resume content:
-\"\"\"
+RESUME:
 {resume_context}
-\"\"\"
 
-Return ONLY valid JSON (no markdown, no code fences):
+Do not assume the candidate has a skill without evidence.
+If it is absent, identify it as a learning gap.
+
+Return this JSON structure:
 {{
-  "genuinely_has_skill": true or false,
-  "note": "one sentence: either where it's evidenced and how to phrase it, or that it's a real gap worth learning"
+  "genuinely_has_skill": false,
+  "note": "One short sentence explaining the evidence or gap"
 }}
 """
-    return _call_model(prompt, max_tokens=200)
+
+    result = _call_model(prompt, max_tokens=800)
+
+    if not isinstance(result.get("genuinely_has_skill"), bool):
+        raise ValueError("Invalid genuinely_has_skill value in AI response.")
+
+    result.setdefault("note", "")
+    return result
 
 
-def generate_suggestions(resume_data: dict, jd_data: dict, match_result: dict) -> dict:
+def generate_suggestions(
+    resume_data: dict,
+    jd_data: dict,
+    match_result: dict,
+) -> dict:
+    """Generate suggestions for unmatched requirements and missing skills."""
+
     resume_context = _resume_context_blob(resume_data)
 
     requirement_suggestions = []
-    # FIX: Properly indented the block inside this loop
-    for req in match_result.get("unmatched_requirements", []):
-        result = suggest_for_requirement(req, resume_context)
-        requirement_suggestions.append({"requirement": req, **result})
-        time.sleep(0.5) # Protects against rate limits
+
+    for requirement in match_result.get("unmatched_requirements", [])[:10]:
+        result = suggest_for_requirement(str(requirement), resume_context)
+
+        requirement_suggestions.append({
+            "requirement": requirement,
+            **result,
+        })
+
+        time.sleep(0.5)
 
     keyword_suggestions = []
-    # FIX: Properly indented the block and added sleep here as well
-    for kw in match_result.get("missing_keywords", []):
-        result = suggest_for_keyword(kw, resume_context)
-        keyword_suggestions.append({"keyword": kw, **result})
-        time.sleep(0.5) # Protects against rate limits
+
+    for keyword in match_result.get("missing_keywords", [])[:10]:
+        result = suggest_for_keyword(str(keyword), resume_context)
+
+        keyword_suggestions.append({
+            "keyword": keyword,
+            **result,
+        })
+
+        time.sleep(0.5)
 
     return {
         "job_title": jd_data.get("job_title", "Unknown role"),
@@ -137,31 +192,28 @@ def generate_suggestions(resume_data: dict, jd_data: dict, match_result: dict) -
     }
 
 
-def _print_suggestions(result: dict):
-    print(f"\n=== Suggestions for: {result['job_title']} ===\n")
+def _print_suggestions(result: dict) -> None:
+    print(f"\n=== Suggestions for: {result['job_title']} ===")
 
-    print("--- Unmatched requirements ---")
-    if not result["requirement_suggestions"]:
-        print("  None — nice.")
+    print("\n--- Unmatched requirements ---")
     for item in result["requirement_suggestions"]:
         print(f"\nRequirement: {item['requirement']}")
+
         if item.get("has_real_match"):
-            print(f"  Suggested bullet: {item.get('suggested_bullet')}")
-            print(f"  Why: {item.get('reasoning')}")
-        else:
-            print(f"  No honest match in resume. {item.get('reasoning')}")
+            print(f"Suggested bullet: {item.get('suggested_bullet', '')}")
+
+        print(f"Reason: {item.get('reasoning', '')}")
+
+    if not result["requirement_suggestions"]:
+        print("No unmatched requirements.")
 
     print("\n--- Missing keywords ---")
-    if not result["keyword_suggestions"]:
-        print("  None — nice.")
     for item in result["keyword_suggestions"]:
         print(f"\nKeyword: {item['keyword']}")
-        if item.get("genuinely_has_skill"):
-            print(f"  {item.get('note')}")
-        else:
-            print(f"  Real gap: {item.get('note')}")
+        print(f"Analysis: {item.get('note', '')}")
 
-    print()
+    if not result["keyword_suggestions"]:
+        print("No missing keywords.")
 
 
 if __name__ == "__main__":
@@ -169,18 +221,39 @@ if __name__ == "__main__":
     jd_path = Path("jd_data.json")
     report_path = Path("match_report.json")
 
-    missing_files = [p.name for p in (resume_path, jd_path, report_path) if not p.exists()]
+    missing_files = [
+        path.name
+        for path in (resume_path, jd_path, report_path)
+        if not path.exists()
+    ]
+
     if missing_files:
-        print(f"Missing file(s): {', '.join(missing_files)}")
-        print("Run resume_extractor.py, jd_extractor.py, then scorer.py first.")
+        print(f"Missing files: {', '.join(missing_files)}")
+        print("Run resume extraction, JD extraction, and scoring first.")
         raise SystemExit(1)
 
-    resume_data = json.loads(resume_path.read_text())
-    jd_data = json.loads(jd_path.read_text())
-    match_result = json.loads(report_path.read_text())
+    try:
+        resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
+        jd_data = json.loads(jd_path.read_text(encoding="utf-8"))
+        match_result = json.loads(report_path.read_text(encoding="utf-8"))
 
-    print("Processing generate_suggestions... ", end="", flush=True)
-    suggestions = generate_suggestions(resume_data, jd_data, match_result)
-    print("Done.")
+        print(f"Using model: {MODEL}")
+        print("Generating suggestions...")
 
-    Path("suggestions.json").write_text(json.dumps(suggestions, indent=2))
+        suggestions = generate_suggestions(
+            resume_data,
+            jd_data,
+            match_result,
+        )
+
+        output_path = Path("suggestions.json")
+        output_path.write_text(
+            json.dumps(suggestions, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        _print_suggestions(suggestions)
+        print(f"\nSuggestions saved to {output_path.resolve()}")
+
+    except Exception as exc:
+        print(f"\nSuggestion generation failed: {exc}")

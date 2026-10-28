@@ -116,7 +116,11 @@ def get_embedding(texts, model=None):
     if model is None:
         model = _load_model()
     embeddings = model.encode(texts)
-    return embeddings.tolist()
+    # SentenceTransformer normally returns a NumPy array, but accepting a
+    # plain list also makes this helper compatible with test doubles/wrappers.
+    if hasattr(embeddings, "tolist"):
+        return embeddings.tolist()
+    return [list(vector) for vector in embeddings]
 
 
 def cosine_similarity(vec1, vec2):

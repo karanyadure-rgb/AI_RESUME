@@ -1,13 +1,5 @@
-from openai import OpenAI
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=os.getenv("GROQ_API_KEY")
-) 
+from llm_client import get_client, MODEL
 
 REQUIRED_FIELDS = ["name", "college", "course", "skills", "experience", "job_target"]
 
@@ -42,8 +34,9 @@ def resume_generator(data: dict):
     Format it cleanly and make it ready to submit.
     """
     
+    client = get_client()
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model=MODEL,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=1200, # Increased token limit to allow for new sections
         temperature=0.7

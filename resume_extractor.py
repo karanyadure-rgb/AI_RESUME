@@ -1,87 +1,131 @@
 import json
 import os
-from openai import OpenAI
-from dotenv import load_dotenv
 
-load_dotenv()
+from llm_client import get_client, MODEL
 
-client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=os.getenv("GROQ_API_KEY")
-)
-
-MODEL = "llama-3.1-8b-instant"
 
 def extract_resume_data(resume_text: str) -> dict:
-    """
-    Turns free-form resume text into structured JSON:
-    summary, skills, experience_bullets, education.
-    This is what the matcher/scorer will operate on later.
-    """
-    prompt = f"""Extract structured data from the resume below.
+    """Extract structured information from a resume using Groq."""
 
-    Return ONLY valid JSON (no markdown, no explanation, no code fences) in this exact shape:
-    {{
-      "summary": "string",
-      "skills": ["skill1", "skill2", ...],
-      "experience_bullets": ["bullet1", "bullet2", ...],
-      "education": ["entry1", "entry2", ...]
-    }}
+    if not resume_text or not resume_text.strip():
+        raise ValueError("Resume text is empty.")
 
-    Resume:
-    \"\"\"
-    {resume_text}
-    \"\"\"
-    """
+    client = get_client()
 
     try:
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
-                # Added the system prompt to enforce strict JSON behavior
-                {"role": "system", "content": "You are a precise data extraction API that outputs strict JSON without any conversational text."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": (
+                        "You extract structured information from resumes. "
+                        "Return only a valid JSON object. "
+                        "Do not include Markdown or explanations."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"""
+    Extract information from the resume below.
+
+    Return exactly these four keys:
+    - summary: a short string
+    - skills: an array of strings
+    - experience_bullets: an array of concise strings
+    - education: an array of strings
+
+    Rules:
+    1. Use only information stated in the resume.
+    2. Use an empty string or empty array when information is unavailable.
+    3. Keep the summary short and each item concise.
+    4. Do not repeat the entire resume.
+    5. Return one complete JSON object.
+
+    Required JSON structure:
+    {{
+        "summary": "Short professional summary",
+        "skills": ["Python", "SQL"],
+        "experience_bullets": ["Developed a Python application"],
+        "education": ["Diploma in Computer Engineering"]
+    }}
+
+    Resume:
+    <resume>
+    {resume_text}
+    </resume>
+    """,
+                },
             ],
-            max_tokens=800,
             temperature=0,
+            max_completion_tokens=4096,
             response_format={"type": "json_object"},
+            reasoning_effort="low",
         )
-    except Exception as e:
-        raise RuntimeError(f"Resume extraction failed: {e}") from e
 
-    raw = response.choices[0].message.content.strip()
+        raw = response.choices[0].message.content
 
-    # Safety net in case the model wraps output in code fences anyway
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        if raw.lower().startswith("json"):
-            raw = raw[4:].strip()
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+        if not raw:
+            raise ValueError(
+                "The AI returned an empty response. Try a shorter resume."
+            )
 
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Model did not return valid JSON: {raw[:300]}") from e
+        resume_data = json.loads(raw)
+
+        required_keys = [
+            "summary",
+            "skills",
+            "experience_bullets",
+            "education",
+        ]
+
+        for key in required_keys:
+            if key not in resume_data:
+                raise ValueError(
+                    f"Resume extraction is missing the '{key}' field."
+                )
+
+        if not isinstance(resume_data["summary"], str):
+            raise ValueError("'summary' must be a string.")
+
+        for key in ["skills", "experience_bullets", "education"]:
+            if not isinstance(resume_data[key], list):
+                raise ValueError(f"'{key}' must be a list.")
+
+        return resume_data
+
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "The AI returned invalid JSON. Try again or use a shorter resume."
+        ) from exc
+
+    except Exception as exc:
+        # Preserve the original error so the app can display its details.
+        raise RuntimeError(f"Resume extraction failed: {exc}") from exc
 
 
 if __name__ == "__main__":
     print("--- RESUME EXTRACTOR ---")
-    path = input("Path to a resume .txt file to extract: ")
-    
-    if not os.path.exists(path):
+    path = input("Path to a resume .txt file: ").strip().strip('"')
+
+    if not os.path.isfile(path):
         print(f"Error: File '{path}' not found!")
     else:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-
         try:
-            print("Processing extract_resume_data... ", end="", flush=True)
+            with open(path, "r", encoding="utf-8") as file:
+                text = file.read()
+
+            print("Extracting resume information...")
             data = extract_resume_data(text)
-            print("Done.")
-            
+
             output_file = "resume_data.json"
-            with open(output_file, "w", encoding="utf-8") as out_f:
-                json.dump(data, out_f, indent=2)
-                
-        except Exception as e:
-            print(f"An error occurred: {e}")
+
+            with open(output_file, "w", encoding="utf-8") as file:
+                json.dump(data, file, indent=2, ensure_ascii=False)
+
+            print(f"Success! Results saved to {output_file}")
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+
+        except Exception as exc:
+            print(f"Error: {exc}")
+

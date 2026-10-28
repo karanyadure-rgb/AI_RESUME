@@ -1,125 +1,176 @@
-from openai import OpenAI
-from dotenv import load_dotenv
-import os
+
 import json
+import os
 
-load_dotenv()
+from llm_client import get_client, MODEL
 
-client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=os.getenv("GROQ_API_KEY")
-)
 
-def extract_jd_data(jd_text):
-    # FIXED: Changed "resume" to "job description"
-    prompt = f"""Extract structured data from the job description below.
-    
-    Return ONLY valid JSON (no markdown, no explanation, no code fences) in this exact shape:
-    {{
-      "job_title": "string",
-      "required_skills": ["skill1", "skill2", ...],
-      "responsibilities": ["responsibility1", "responsibility2", ...],
-      "qualifications": ["qualification1", "qualification2", ...]
-    }}
-    
-    JOB description:
-    \"\"\"
-    {jd_text}
-    \"\"\"
-    """
+def extract_jd_data(jd_text: str) -> dict:
+    """Extract structured information from a job description."""
+
+    if not jd_text or not jd_text.strip():
+        raise ValueError("Job description is empty.")
+
+    client = get_client()
+
+    prompt = f"""
+Extract information from the job description below.
+
+Return one valid JSON object with exactly these keys:
+- job_title: string
+- required_skills: array of strings
+- responsibilities: array of strings
+- qualifications: array of strings
+
+Use an empty string or empty array when information is unavailable.
+Do not invent information. Return JSON only.
+
+Example:
+{{
+    "job_title": "Python Developer",
+    "required_skills": ["Python", "SQL"],
+    "responsibilities": ["Develop applications"],
+    "qualifications": ["Relevant degree or equivalent experience"]
+}}
+
+JOB DESCRIPTION:
+<job_description>
+{jd_text}
+</job_description>
+"""
+
     try:
         response = client.chat.completions.create(
-            model='llama-3.1-8b-instant',
-            # ADDED: System prompt to strictly enforce JSON behavior
+            model=MODEL,
             messages=[
-                {"role": "system", "content": "You are a precise data extraction API that outputs strict JSON without any conversational text."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract job description data accurately. "
+                        "Return a valid JSON object only."
+                    ),
+                },
+                {"role": "user", "content": prompt},
             ],
-            max_tokens=800,
             temperature=0,
-            response_format={"type": "json_object"}
+            max_tokens=1500,
+            response_format={"type": "json_object"},
         )
-        jd_raw = response.choices[0].message.content.strip()
-    except Exception as e:
-            raise RuntimeError(f"JD_extraction failed: {e}") from e
-    
-    # IMPROVED: Safety net to catch both "```" and "```json"
-    if jd_raw.startswith("```"):
-        jd_raw = jd_raw.strip("`")
-        if jd_raw.lower().startswith("json"):
-            jd_raw = jd_raw[4:].strip()
-        jd_raw = jd_raw.split("\n", 1)[1] if "\n" in jd_raw else jd_raw
 
-    try:
-        return json.loads(jd_raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Model did not return valid JSON: {jd_raw[:300]}") from e
+        raw = response.choices[0].message.content
+
+        if not raw or not raw.strip():
+            raise ValueError("The model returned an empty response.")
+
+        data = json.loads(raw)
+
+        required_keys = [
+            "job_title",
+            "required_skills",
+            "responsibilities",
+            "qualifications",
+        ]
+
+        for key in required_keys:
+            if key not in data:
+                raise ValueError(f"Missing JSON field: {key}")
+
+        if not isinstance(data["job_title"], str):
+            raise ValueError("job_title must be a string.")
+
+        for key in required_keys[1:]:
+            if not isinstance(data[key], list):
+                raise ValueError(f"{key} must be a list.")
+
+        return data
+
+    except Exception as e:
+        raise RuntimeError(f"JD extraction failed: {e}") from e
+
 
 def load_document(filepath):
     if not os.path.exists(filepath):
         print(f"Error: File '{filepath}' not found!")
         return None
-    with open(filepath, 'r', encoding='utf-8') as f:
+
+    with open(filepath, "r", encoding="utf-8") as f:
         text = f.read()
+
     if not text.strip():
         print("Error: Document is empty!")
         return None
-        
-    print("Processing extract_jd_data... ", end="", flush=True)
+
+    print("Processing job description...", flush=True)
     result = extract_jd_data(text)
     print("Done.")
     return result
 
+
 def paste_text() -> dict | None:
-    print("Paste the job description below. Press Enter on an empty line when done:")
+    print(
+        "Paste the job description below. "
+        "Press Enter on an empty line when done:"
+    )
+
     lines = []
+
     while True:
         line = input()
-        if line == '':
+        if line == "":
             break
         lines.append(line)
 
     text = "\n".join(lines).strip()
 
-    if not text.strip():
+    if not text:
         print("Error: You did not paste a job description.")
         return None
-        
-    print("Processing extract_jd_data... ", end="", flush=True)
+
+    print("Processing job description...", flush=True)
     result = extract_jd_data(text)
     print("Done.")
     return result
 
+
 if __name__ == "__main__":
     print("--- JOB DESCRIPTION EXTRACTOR ---")
+
     while True:
         print("\nOptions:")
         print("1. Enter a document file path")
         print("2. Paste the job description text directly")
         print("3. Exit")
-        choice_raw = input("Enter your choice (1, 2, or 3): ")
-        
+
+        choice_raw = input("Enter your choice (1, 2, or 3): ").strip()
+
         if not choice_raw.isdigit():
             print("Please enter a valid number (1, 2, or 3).")
-            continue        
+            continue
 
         choice = int(choice_raw)
         data = None
 
-        if choice == 1:
-            file_name = input("Enter the file path: ")
-            data = load_document(file_name)
+        try:
+            if choice == 1:
+                file_name = input("Enter the file path: ").strip()
+                data = load_document(file_name)
 
-        elif choice == 2:
-            data = paste_text()
+            elif choice == 2:
+                data = paste_text()
 
-        elif choice == 3:
-            print("Exiting...")
-            break
+            elif choice == 3:
+                print("Exiting...")
+                break
 
-        else:
-            print("Enter a valid choice number (1, 2, or 3).")
+            else:
+                print("Enter a valid choice number (1, 2, or 3).")
+                continue
 
-        if data:
-            with open("jd_data.json", "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            if data:
+                with open("jd_data.json", "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+
+                print("Saved extracted data to jd_data.json")
+
+        except Exception as e:
+            print(f"Error: {e}")
