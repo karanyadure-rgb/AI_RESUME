@@ -14,7 +14,7 @@ An AI-powered toolkit designed to generate polished resumes from raw data, analy
 ## 🛠️ Tech Stack
 *   **Language:** Python 3.10+
 *   **Frontend:** Streamlit
-*   **LLM Provider:** Groq API (`llama-3.1-8b-instant`)
+*   **LLM Provider:** Groq API (`openai/gpt-oss-20b`)
 *   **Embeddings:** `sentence-transformers` (`all-MiniLM-L6-v2`) for local, cost-free semantic scoring
 
 ---
